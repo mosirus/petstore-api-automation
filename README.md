@@ -1,84 +1,85 @@
 # Petstore API Automation
 
-API automation suite for the public [Swagger Petstore](https://petstore.swagger.io/v2) API, built with [Playwright Test](https://playwright.dev/docs/api-testing) (`@playwright/test` request context — no browser needed).
+API automation suite for the public [Swagger Petstore](https://petstore.swagger.io/v2) API, built with [Playwright Test](https://playwright.dev/docs/api-testing) and TypeScript. It uses Playwright's request context only — no browser is installed or launched.
 
-Covers the 3 endpoints from the QA Take Home Test, Task 2:
+Endpoints covered (QA Take Home Test, Task 2):
 
-- `POST /pet` — Add a new pet
-- `GET /pet/findByStatus` — Find pets by status
-- `DELETE /pet/{petId}` — Delete a pet by ID
+| Endpoint                | Spec file                               | Happy path                               | Known issues   |
+| ----------------------- | --------------------------------------- | ---------------------------------------- | -------------- |
+| `POST /pet`             | `tests/pet/add-pet.spec.ts`             | create + persist                         | BUG-01, BUG-02 |
+| `GET /pet/findByStatus` | `tests/pet/find-pets-by-status.spec.ts` | one per status (×3)                      | BUG-03, BUG-04 |
+| `DELETE /pet/{petId}`   | `tests/pet/delete-pet.spec.ts`          | delete + verify gone, 404 for unknown id | BUG-05         |
 
-Each endpoint has one happy-path test and the negative/edge cases documented in the Task 1 manual test report (`REPORT.md` in this repo), so the discrepancies between the Swagger documentation and the live API's actual behavior are also captured as automated, repeatable checks.
+## Quick start
+
+Requires Node.js 20.19+.
+
+```bash
+npm ci
+cp .env.example .env   # optional — defaults target the public sandbox
+npm test
+```
+
+| Script                      | Purpose                                      |
+| --------------------------- | -------------------------------------------- |
+| `npm test`                  | Run the full suite                           |
+| `npm run test:smoke`        | Run only `@smoke` tests                      |
+| `npm run test:known-issues` | Run only `@known-issue` tests                |
+| `npm run test:ui`           | Playwright UI mode                           |
+| `npm run report`            | Open the last HTML report                    |
+| `npm run verify`            | Typecheck + lint + format check (runs in CI) |
 
 ## Project structure
 
 ```
-petstore-api-automation/
-├── .github/workflows/api-tests.yml   # CI pipeline (GitHub Actions)
-├── config/
-│   ├── env.config.ts                 # environment variables (dotenv)
-│   └── playwright.config.ts          # Playwright Test configuration
+├── playwright.config.ts          # runner config: reporters, retries, traces
 ├── src/
-│   ├── clients/pet.client.ts         # typed API client for /pet endpoints
-│   ├── fixtures/api.fixtures.ts      # custom fixture injecting petClient
-│   ├── types/pet.types.ts            # Pet/Category/Tag TypeScript types
-│   └── utils/test-data.ts            # test data builders
-├── tests/api/
-│   ├── post-pet.spec.ts
-│   ├── find-by-status.spec.ts
-│   └── delete-pet.spec.ts
-├── .env.example
-├── package.json
-├── tsconfig.json
-└── REPORT.md                         # test execution report
+│   ├── config.ts                 # env vars, validated with zod
+│   ├── api/
+│   │   ├── base.client.ts        # shared HTTP plumbing (the API "BasePage")
+│   │   └── pet.client.ts         # /pet endpoints (the API "page object")
+│   ├── schemas/pet.schema.ts     # zod contracts; TS types are inferred from them
+│   ├── data/pet.factory.ts       # test data builders + unique id generation
+│   ├── fixtures/
+│   │   ├── api.fixtures.ts       # petClient, seedPet, trackPetForCleanup
+│   │   └── matchers.ts           # custom expect matchers (toHaveStatusCode)
+│   ├── helpers/response.ts       # parseBody(): JSON + schema validation, typed
+│   └── constants/                # HttpStatus, KnownIssues registry
+└── tests/pet/*.spec.ts           # scenarios and assertions only
 ```
 
-## Prerequisites
+## Design principles
 
-- Node.js 18+
-- npm
+**Layered, single-responsibility architecture.** Specs describe behavior and own the assertions. Clients only know how to call endpoints and return the raw `APIResponse`. Fixtures handle setup and teardown. Factories own test data. No spec builds a URL or a payload by hand.
 
-## Setup
+**Contract testing with zod.** `parseBody(response, PetSchema)` validates the body at runtime and returns a fully typed value, so a contract break fails with a readable schema diff instead of an `undefined` deep in an assertion. The schemas are also the single source of truth for TypeScript types.
 
-```bash
-npm install
-cp .env.example .env   # optional, defaults already point at the public sandbox
-```
+**Guaranteed cleanup.** Every pet a test creates is registered through `seedPet` or `trackPetForCleanup`. Fixture teardown deletes those pets even when the test fails, so the shared sandbox doesn't fill up with leftovers.
 
-## Running the tests
+**Built for a shared, eventually consistent sandbox.**
 
-```bash
-# Run the full suite headlessly
-npm test
+- Pet ids are random and drawn from a dedicated high range, so parallel workers and concurrent CI runs don't collide.
+- Read-after-write checks use `expect.poll`, because the load-balanced sandbox doesn't always serve a new or deleted pet immediately.
+- `seedPet` waits until the pet is readable before handing it to the test.
+- CI retries twice. Traces (including every request and response) are kept on failure.
 
-# Run with Playwright's UI runner (interactive)
-npm run test:ui 2>/dev/null || npx playwright test --config=config/playwright.config.ts --ui
+**Fail-fast guard against the base-URL trap.** Endpoint paths are relative (`pet`, not `/pet`) and the base URL always ends with `/`. A leading slash would resolve against the host root and silently drop `/v2`, so `BaseApiClient` throws if one is used.
 
-# Step-through debug mode
-npm run test:debug
+**Readable reports.** Each HTTP call is a boxed `test.step` (e.g. `POST pet`). `toHaveStatusCode` prints the URL and response body on failure.
 
-# Open the last HTML report
-npm run report
-```
+**Known issues as first-class metadata.** The spec deviations found in Task 1 live in `src/constants/known-issues.ts`. Tests attach them with `knownIssue(KnownIssues.BUG_0x)`, which adds the `@known-issue` tag and an `issue` annotation shown in the HTML report. These tests assert the _currently observed_ behavior, with the spec expectation in a comment. They act as regression guards: if the API is fixed upstream, the test fails and flags that the issue entry needs revisiting.
 
-Run a single file or test by name:
-
-```bash
-npx playwright test --config=config/playwright.config.ts tests/api/post-pet.spec.ts
-npx playwright test --config=config/playwright.config.ts -g "deletes an existing pet"
-```
+**Static quality gates.** TypeScript `strict` (plus `noUncheckedIndexedAccess`), `typescript-eslint` `strictTypeChecked` (including `no-floating-promises`, the most common cause of false-green API tests), `eslint-plugin-playwright`, and Prettier.
 
 ## Configuration
 
-The target API base URL is read from `config/env.config.ts`, which loads `.env` (see `.env.example`). It defaults to `https://petstore.swagger.io/v2`, the public Petstore sandbox, so no setup is required to run the suite out of the box.
+| Variable         | Default                          | Description              |
+| ---------------- | -------------------------------- | ------------------------ |
+| `API_BASE_URL`   | `https://petstore.swagger.io/v2` | Base URL of the API      |
+| `API_TIMEOUT_MS` | `15000`                          | Per-request timeout (ms) |
 
-## Design notes
-
-- **No Page Object Model here** — this is pure API testing, so the equivalent abstraction is a typed **API client** (`src/clients/pet.client.ts`) that wraps raw HTTP calls behind readable method names (`addPet`, `findByStatus`, `deletePet`). Specs assert on responses; they never build requests by hand.
-- **Fixtures** (`src/fixtures/api.fixtures.ts`) inject `petClient` into every test via Playwright's fixture system, avoiding repeated setup code.
-- **Test data builders** (`src/utils/test-data.ts`) generate unique pet IDs per run (`Date.now()`-based) so parallel runs against the shared public sandbox never collide.
-- **Known-issue tests** are explicitly labeled `[known issue BUG-0x]` in their titles and commented with the expected (spec) vs. observed (actual) behavior, cross-referenced to `REPORT.md`. They assert the *currently observed* behavior so the suite stays green and acts as a regression guard — if the mismatch is ever fixed upstream, the assertion will start failing and flag that the test (and the bug entry) need to be updated.
+Values are validated at startup. An invalid URL fails immediately with a clear message.
 
 ## CI/CD
 
-`.github/workflows/api-tests.yml` runs the full suite on every push/PR to `main` and uploads the Playwright HTML report as a build artifact.
+`.github/workflows/api-tests.yml` runs on push and PR to `main`/`master`, on manual dispatch, and daily (to catch upstream sandbox changes). It runs `npm run verify` and then the suite, and uploads the HTML report plus JUnit results and traces as artifacts.

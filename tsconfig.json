@@ -1,18 +1,18 @@
 {
   "compilerOptions": {
-    "target": "ES2021",
+    "target": "ES2022",
     "module": "commonjs",
-    "lib": ["ES2021"],
+    "lib": ["ES2022"],
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
     "moduleResolution": "node",
-    "baseUrl": ".",
-    "paths": {
-      "@src/*": ["src/*"]
-    }
+    "noEmit": true
   },
-  "include": ["config/**/*.ts", "src/**/*.ts", "tests/**/*.ts"]
+  "include": ["playwright.config.ts", "src/**/*.ts", "tests/**/*.ts"]
 }
